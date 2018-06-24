@@ -51,12 +51,10 @@
 
         <section data-markdown>
           <textarea data-template>
-## 悩ましい…
-
-* DataBaseを操作するあたり
-* AWSなどSaaSサービスを使いたい
+* データベースを操作するプログラムのテスト
 * ElasticSearch
-* 外部サービス/ミドルウェアとの連携テスト
+* Amazon Simple Queue Service
+* 外部サービス/ミドルウェア
           </textarea>
         </section>
 
@@ -64,7 +62,7 @@
           <textarea data-template>
 ## 開発のとき
 
-* git cloneしてテストを実行できない
+* `git clone` して `test` ができない
 * 環境構築手順書が必要(Windows版、macOS版…)
 * 動かないスクリプト
 * 共通のサーバー
@@ -75,7 +73,7 @@
           <textarea data-template>
 ## Deployのとき
 
-* Jenkins Slaveにインストール
+* Jenkins Slaveに事前にインストール
 * インストールできない場合は接続できるように
 * 版が変わったらSlaveの環境を更新
 * 職人の誕生
@@ -88,6 +86,7 @@
 
 * Unitテスト実行したら環境できて欲しい
 * 開発もCD/CIも実行したら環境できて欲しい
+* `git clone` したら何も考えずに `test` 実行したい
           </textarea>
         </section>
 
@@ -108,6 +107,503 @@
 * [whisklabs/docker-it-scala](https://github.com/whisklabs/docker-it-scala)
           </textarea>
         </section>
+
+        <section>
+          <h2>Setup</h2>
+          <pre><code class="scala" data-trim>
+libraryDependencies ++= Seq(
+  "com.whisk" %% "docker-testkit-scalatest" % "0.9.5" % "test",
+  "com.whisk" %% "docker-testkit-impl-spotify" % "0.9.5" % "test"
+)
+          </code></pre>
+        </section>
+
+        <section data-markdown>
+          <textarea data-template>
+## ちなみに…
+
+[whisklabs/docker-it-scala](https://github.com/whisklabs/docker-it-scala) は、[spotify/docker-client](https://github.com/spotify/docker-client) に依存しています。
+
+[spotify/docker-client](https://github.com/spotify/docker-client) は、Javaライブラリなので、これを使ってうまいことやれば、Javaで出来る。
+
+(はずです。試してません…)
+          </textarea>
+        </section>
+
+
+        <section>
+          <p>今回はDynamoDBで試してみた</p>
+          <pre><code class="scala" data-trim>
+libraryDependencies ++= Seq(
+  "com.amazonaws" % "aws-java-sdk-dynamodb" % "1.11.353"
+)
+          </code></pre>
+        </section>
+
+        <section>
+          <p>DockerSpecSupport.scala</p>
+          <pre><code class="scala" data-trim>
+trait DockerSpecSupport extends DockerTestKit { this: Suite =>
+
+  private val dockerClient: DockerClient =
+    DefaultDockerClient.fromEnv().build()
+
+  override implicit def dockerFactory: DockerFactory =
+    new SpotifyDockerFactory(dockerClient)
+
+}
+          </code></pre>
+          <p>SpotifyのDocker Clientを使って<br>dockerを操作する基底となる処理を書く。</p>
+        </section>
+
+        <section>
+          <p>DockerDynamoDBSpecSupport.scala</p>
+          <pre><code class="scala" data-trim>
+trait DockerDynamoDBSpecSupport extends DockerSpecSupport { this: Suite =>
+
+  protected val dynamoDBPort = RandomSocket.nextPort()
+
+  protected val dynamoDBContainer =
+    DockerContainer("fingershock/dynamodb-local:latest")
+      .withPorts(8000 -> Some(dynamoDBPort))
+
+  protected val dynamoDBClient: AmazonDynamoDB =
+    AmazonDynamoDBClientBuilder.standard()
+      .withEndpointConfiguration(
+        new EndpointConfiguration(
+          s"http://127.0.0.1:$dynamoDBPort", Regions.AP_NORTHEAST_1.getName
+        )).build()
+
+}
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section>
+          <p>DynamoDBSpec.scala</p>
+          <pre><code class="scala" data-trim>
+class DynamoDBSpec extends FlatSpec with Matchers with DockerDynamoDBSpecSupport {
+
+  private val TableName: String = "sample-table"
+
+  override def dockerContainers: List[DockerContainer] =
+    dynamoDBContainer :: super.dockerContainers
+
+  override def beforeAll(): Unit = { ... }
+
+  override def afterAll(): Unit = { ... }
+
+  "DynamoDB" should "success" in { ... }
+
+}
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section>
+          <p>DynamoDBSpec.scala #beforeAll</p>
+          <pre><code class="scala" data-trim>
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+
+    val createTableRequest = new CreateTableRequest()
+      .withTableName(TableName)
+      .withAttributeDefinitions(
+        new AttributeDefinition("id", ScalarAttributeType.S))
+      .withKeySchema(
+        new KeySchemaElement("id", KeyType.HASH))
+      .withProvisionedThroughput(
+        new ProvisionedThroughput(1L, 1L))
+
+    dynamoDBClient.createTable(createTableRequest)
+  }
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section>
+          <p>DynamoDBSpec.scala #afterAll</p>
+          <pre><code class="scala" data-trim>
+  override def afterAll(): Unit = {
+    dynamoDBClient.deleteTable(TableName)
+    super.afterAll()
+  }
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section>
+          <p>DynamoDBSpec.scala #DynamoDB should success</p>
+          <pre><code class="scala" data-trim>
+  "DynamoDB" should "success" in {
+    dynamoDBClient.putItem(
+      TableName,
+      Map(
+        "id" -> new AttributeValue().withS("aaaaa")
+      ).asJava
+    ).getAttributes shouldBe null
+
+    dynamoDBClient.getItem(
+      TableName,
+      Map(
+        "id" -> new AttributeValue().withS("aaaaa")
+      ).asJava
+    ).getItem.asScala("id").getS shouldBe "aaaaa"
+  }
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section>
+          <p>run</p>
+          <pre><code class="bash" data-trim>
+21:31:58.171 [pool-5-thread-1] DEBUG com.spotify.docker.client.DockerCertificates - $HOME/.docker/ca.pem, $HOME/.docker/key.pem or $HOME/.docker/cert.pem does not exist, not using SSL
+21:31:59.184 [pool-5-thread-1] DEBUG com.spotify.docker.client.DockerConfigReader - Using configfile: $HOME/.docker/config.json
+21:32:01.330 [pool-7-thread-1] DEBUG com.spotify.docker.client.auth.ConfigFileRegistryAuthSupplier - Failed first attempt to find auth for https://index.docker.io/v1/
+java.lang.IllegalArgumentException: serverAddress=https://index.docker.io/v1/ does not appear in config file at $HOME/.docker/config.json
+	at com.spotify.docker.client.DockerConfigReader.parseDockerConfig(DockerConfigReader.java:89)
+	at com.spotify.docker.client.DockerConfigReader.fromConfig(DockerConfigReader.java:59)
+	at com.spotify.docker.client.auth.ConfigFileRegistryAuthSupplier.authFor(ConfigFileRegistryAuthSupplier.java:74)
+	at com.spotify.docker.client.DefaultDockerClient.pull(DefaultDockerClient.java:1223)
+	at com.spotify.docker.client.DefaultDockerClient.pull(DefaultDockerClient.java:1217)
+	at com.whisk.docker.impl.spotify.SpotifyDockerCommandExecutor.$anonfun$pullImage$1(SpotifyDockerCommandExecutor.scala:194)
+	at com.whisk.docker.impl.spotify.SpotifyDockerCommandExecutor$$Lambda$3760/591320700.apply$mcV$sp(Unknown Source)
+	at scala.runtime.java8.JFunction0$mcV$sp.apply(JFunction0$mcV$sp.java:12)
+	at scala.concurrent.Future$.$anonfun$apply$1(Future.scala:654)
+	at scala.concurrent.Future$$$Lambda$3750/1704912779.apply(Unknown Source)
+	at scala.util.Success.$anonfun$map$1(Try.scala:251)
+	at scala.util.Success.map(Try.scala:209)
+	at scala.concurrent.Future.$anonfun$map$1(Future.scala:288)
+	at scala.concurrent.Future$$Lambda$3309/1522333512.apply(Unknown Source)
+	at scala.concurrent.impl.Promise.liftedTree1$1(Promise.scala:29)
+	at scala.concurrent.impl.Promise.$anonfun$transform$1(Promise.scala:29)
+	at scala.concurrent.impl.Promise$$Lambda$3310/1980527563.apply(Unknown Source)
+	at scala.concurrent.impl.CallbackRunnable.run(Promise.scala:60)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+	at java.lang.Thread.run(Thread.java:745)
+21:32:01.331 [pool-7-thread-1] DEBUG com.spotify.docker.client.auth.ConfigFileRegistryAuthSupplier - Failed second attempt to find auth for docker.io
+java.lang.IllegalArgumentException: serverAddress=docker.io does not appear in config file at $HOME/.docker/config.json
+	at com.spotify.docker.client.DockerConfigReader.parseDockerConfig(DockerConfigReader.java:89)
+	at com.spotify.docker.client.DockerConfigReader.fromConfig(DockerConfigReader.java:59)
+	at com.spotify.docker.client.auth.ConfigFileRegistryAuthSupplier.authFor(ConfigFileRegistryAuthSupplier.java:82)
+	at com.spotify.docker.client.DefaultDockerClient.pull(DefaultDockerClient.java:1223)
+	at com.spotify.docker.client.DefaultDockerClient.pull(DefaultDockerClient.java:1217)
+	at com.whisk.docker.impl.spotify.SpotifyDockerCommandExecutor.$anonfun$pullImage$1(SpotifyDockerCommandExecutor.scala:194)
+	at com.whisk.docker.impl.spotify.SpotifyDockerCommandExecutor$$Lambda$3760/591320700.apply$mcV$sp(Unknown Source)
+	at scala.runtime.java8.JFunction0$mcV$sp.apply(JFunction0$mcV$sp.java:12)
+	at scala.concurrent.Future$.$anonfun$apply$1(Future.scala:654)
+	at scala.concurrent.Future$$$Lambda$3750/1704912779.apply(Unknown Source)
+	at scala.util.Success.$anonfun$map$1(Try.scala:251)
+	at scala.util.Success.map(Try.scala:209)
+	at scala.concurrent.Future.$anonfun$map$1(Future.scala:288)
+	at scala.concurrent.Future$$Lambda$3309/1522333512.apply(Unknown Source)
+	at scala.concurrent.impl.Promise.liftedTree1$1(Promise.scala:29)
+	at scala.concurrent.impl.Promise.$anonfun$transform$1(Promise.scala:29)
+	at scala.concurrent.impl.Promise$$Lambda$3310/1980527563.apply(Unknown Source)
+	at scala.concurrent.impl.CallbackRunnable.run(Promise.scala:60)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+	at java.lang.Thread.run(Thread.java:745)
+21:32:03.865 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=latest, status=Pulling from fingershock/dynamodb-local, stream=null, error=null, progress=null, progressDetail=null}
+21:32:03.867 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.867 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.867 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Pulling fs layer, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Waiting, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Waiting, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:03.868 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Waiting, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:04.833 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[>                                                  ]  34.46kB/3.419MB, progressDetail=ProgressDetail{current=34458, start=null, total=3418757}}
+21:32:04.933 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==>                                                ]  179.7kB/3.419MB, progressDetail=ProgressDetail{current=179708, start=null, total=3418757}}
+21:32:04.999 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[>                                                  ]  20.86kB/2.066MB, progressDetail=ProgressDetail{current=20861, start=null, total=2065537}}
+21:32:05.063 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=====>                                             ]  359.4kB/3.419MB, progressDetail=ProgressDetail{current=359400, start=null, total=3418757}}
+21:32:05.134 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[==>                                                ]  85.63kB/2.066MB, progressDetail=ProgressDetail{current=85633, start=null, total=2065537}}
+21:32:05.181 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[========>                                          ]  551.7kB/3.419MB, progressDetail=ProgressDetail{current=551690, start=null, total=3418757}}
+21:32:05.237 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[>                                                  ]  531.2kB/58.46MB, progressDetail=ProgressDetail{current=531156, start=null, total=58458375}}
+21:32:05.265 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===>                                               ]  155.2kB/2.066MB, progressDetail=ProgressDetail{current=155170, start=null, total=2065537}}
+21:32:05.298 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==========>                                        ]    736kB/3.419MB, progressDetail=ProgressDetail{current=736010, start=null, total=3418757}}
+21:32:05.406 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[============>                                      ]  883.5kB/3.419MB, progressDetail=ProgressDetail{current=883466, start=null, total=3418757}}
+21:32:05.406 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=====>                                             ]  228.5kB/2.066MB, progressDetail=ProgressDetail{current=228499, start=null, total=2065537}}
+21:32:05.524 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[===============>                                   ]  1.031MB/3.419MB, progressDetail=ProgressDetail{current=1030922, start=null, total=3418757}}
+21:32:05.554 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=======>                                           ]    294kB/2.066MB, progressDetail=ProgressDetail{current=294035, start=null, total=2065537}}
+21:32:05.572 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[>                                                  ]  1.064MB/58.46MB, progressDetail=ProgressDetail{current=1063636, start=null, total=58458375}}
+21:32:05.651 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=================>                                 ]  1.178MB/3.419MB, progressDetail=ProgressDetail{current=1178378, start=null, total=3418757}}
+21:32:05.682 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=======>                                           ]  326.8kB/2.066MB, progressDetail=ProgressDetail{current=326803, start=null, total=2065537}}
+21:32:05.767 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[===================>                               ]  1.326MB/3.419MB, progressDetail=ProgressDetail{current=1325834, start=null, total=3418757}}
+21:32:05.890 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=========>                                         ]  392.3kB/2.066MB, progressDetail=ProgressDetail{current=392339, start=null, total=2065537}}
+21:32:05.907 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=====================>                             ]  1.473MB/3.419MB, progressDetail=ProgressDetail{current=1473290, start=null, total=3418757}}
+21:32:05.954 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=>                                                 ]  1.596MB/58.46MB, progressDetail=ProgressDetail{current=1596116, start=null, total=58458375}}
+21:32:06.013 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[==========>                                        ]  425.1kB/2.066MB, progressDetail=ProgressDetail{current=425107, start=null, total=2065537}}
+21:32:06.025 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[======================>                            ]  1.572MB/3.419MB, progressDetail=ProgressDetail{current=1571594, start=null, total=3418757}}
+21:32:06.154 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=========================>                         ]  1.719MB/3.419MB, progressDetail=ProgressDetail{current=1719050, start=null, total=3418757}}
+21:32:06.193 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===========>                                       ]  490.6kB/2.066MB, progressDetail=ProgressDetail{current=490643, start=null, total=2065537}}
+21:32:06.262 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=>                                                 ]  2.129MB/58.46MB, progressDetail=ProgressDetail{current=2128596, start=null, total=58458375}}
+21:32:06.278 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[===========================>                       ]  1.867MB/3.419MB, progressDetail=ProgressDetail{current=1866506, start=null, total=3418757}}
+21:32:06.329 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=============>                                     ]  556.2kB/2.066MB, progressDetail=ProgressDetail{current=556179, start=null, total=2065537}}
+21:32:06.415 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==============================>                    ]  2.063MB/3.419MB, progressDetail=ProgressDetail{current=2063114, start=null, total=3418757}}
+21:32:06.476 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===============>                                   ]  621.7kB/2.066MB, progressDetail=ProgressDetail{current=621715, start=null, total=2065537}}
+21:32:06.536 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[================================>                  ]  2.211MB/3.419MB, progressDetail=ProgressDetail{current=2210570, start=null, total=3418757}}
+21:32:06.542 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==>                                                ]  2.661MB/58.46MB, progressDetail=ProgressDetail{current=2661076, start=null, total=58458375}}
+21:32:06.621 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[================>                                  ]  687.3kB/2.066MB, progressDetail=ProgressDetail{current=687251, start=null, total=2065537}}
+21:32:06.640 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==================================>                ]  2.358MB/3.419MB, progressDetail=ProgressDetail{current=2358026, start=null, total=3418757}}
+21:32:06.743 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[===================================>               ]  2.456MB/3.419MB, progressDetail=ProgressDetail{current=2456330, start=null, total=3418757}}
+21:32:06.800 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[==================>                                ]  752.4kB/2.066MB, progressDetail=ProgressDetail{current=752381, start=null, total=2065537}}
+21:32:06.831 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==>                                                ]  3.189MB/58.46MB, progressDetail=ProgressDetail{current=3189460, start=null, total=58458375}}
+21:32:06.864 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[======================================>            ]  2.641MB/3.419MB, progressDetail=ProgressDetail{current=2640650, start=null, total=3418757}}
+21:32:06.910 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===================>                               ]  785.1kB/2.066MB, progressDetail=ProgressDetail{current=785149, start=null, total=2065537}}
+21:32:06.970 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=======================================>           ]   2.69MB/3.419MB, progressDetail=ProgressDetail{current=2689802, start=null, total=3418757}}
+21:32:07.069 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===================>                               ]  813.8kB/2.066MB, progressDetail=ProgressDetail{current=813821, start=null, total=2065537}}
+21:32:07.081 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[========================================>          ]  2.739MB/3.419MB, progressDetail=ProgressDetail{current=2738954, start=null, total=3418757}}
+21:32:07.202 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==========================================>        ]  2.874MB/3.419MB, progressDetail=ProgressDetail{current=2874122, start=null, total=3418757}}
+21:32:07.203 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[====================>                              ]  846.6kB/2.066MB, progressDetail=ProgressDetail{current=846589, start=null, total=2065537}}
+21:32:07.319 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===>                                               ]   3.73MB/58.46MB, progressDetail=ProgressDetail{current=3730132, start=null, total=58458375}}
+21:32:07.336 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[============================================>      ]  3.013MB/3.419MB, progressDetail=ProgressDetail{current=3013386, start=null, total=3418757}}
+21:32:07.365 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[======================>                            ]  912.1kB/2.066MB, progressDetail=ProgressDetail{current=912125, start=null, total=2065537}}
+21:32:07.484 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[==============================================>    ]   3.21MB/3.419MB, progressDetail=ProgressDetail{current=3209994, start=null, total=3418757}}
+21:32:07.499 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=======================>                           ]  977.7kB/2.066MB, progressDetail=ProgressDetail{current=977661, start=null, total=2065537}}
+21:32:07.568 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===>                                               ]  4.259MB/58.46MB, progressDetail=ProgressDetail{current=4258516, start=null, total=58458375}}
+21:32:07.607 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Downloading, stream=null, error=null, progress=[=================================================> ]  3.407MB/3.419MB, progressDetail=ProgressDetail{current=3406602, start=null, total=3418757}}
+21:32:07.618 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:07.618 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Download complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:07.654 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=========================>                         ]  1.068MB/2.066MB, progressDetail=ProgressDetail{current=1067773, start=null, total=2065537}}
+21:32:07.756 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====>                                              ]  4.799MB/58.46MB, progressDetail=ProgressDetail{current=4799188, start=null, total=58458375}}
+21:32:07.762 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[============================>                      ]  1.191MB/2.066MB, progressDetail=ProgressDetail{current=1190653, start=null, total=2065537}}
+21:32:07.885 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===============================>                   ]  1.281MB/2.066MB, progressDetail=ProgressDetail{current=1280765, start=null, total=2065537}}
+21:32:07.999 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[================================>                  ]  1.354MB/2.066MB, progressDetail=ProgressDetail{current=1354493, start=null, total=2065537}}
+21:32:08.002 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====>                                              ]  5.324MB/58.46MB, progressDetail=ProgressDetail{current=5324008, start=null, total=58458375}}
+21:32:08.102 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[==================================>                ]  1.441MB/2.066MB, progressDetail=ProgressDetail{current=1440509, start=null, total=2065537}}
+21:32:08.265 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[===================================>               ]  1.477MB/2.066MB, progressDetail=ProgressDetail{current=1477373, start=null, total=2065537}}
+21:32:08.306 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====>                                             ]  5.864MB/58.46MB, progressDetail=ProgressDetail{current=5864148, start=null, total=58458375}}
+21:32:08.382 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=====================================>             ]  1.555MB/2.066MB, progressDetail=ProgressDetail{current=1555197, start=null, total=2065537}}
+21:32:08.527 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====>                                             ]  6.397MB/58.46MB, progressDetail=ProgressDetail{current=6396628, start=null, total=58458375}}
+21:32:08.568 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[========================================>          ]  1.658MB/2.066MB, progressDetail=ProgressDetail{current=1657597, start=null, total=2065537}}
+21:32:08.737 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[=========================================>         ]  1.727MB/2.066MB, progressDetail=ProgressDetail{current=1727229, start=null, total=2065537}}
+21:32:08.808 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Downloading, stream=null, error=null, progress=[==================================================>]      97B/97B, progressDetail=ProgressDetail{current=97, start=null, total=97}}
+21:32:08.809 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====>                                             ]  6.929MB/58.46MB, progressDetail=ProgressDetail{current=6929108, start=null, total=58458375}}
+21:32:08.809 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:08.809 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Download complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:08.846 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[============================================>      ]  1.826MB/2.066MB, progressDetail=ProgressDetail{current=1825533, start=null, total=2065537}}
+21:32:08.981 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[==============================================>    ]  1.924MB/2.066MB, progressDetail=ProgressDetail{current=1923837, start=null, total=2065537}}
+21:32:09.023 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======>                                            ]   7.47MB/58.46MB, progressDetail=ProgressDetail{current=7469780, start=null, total=58458375}}
+21:32:09.106 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[================================================>  ]  1.989MB/2.066MB, progressDetail=ProgressDetail{current=1989373, start=null, total=2065537}}
+21:32:09.275 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Downloading, stream=null, error=null, progress=[================================================>  ]  2.022MB/2.066MB, progressDetail=ProgressDetail{current=2022141, start=null, total=2065537}}
+21:32:09.334 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======>                                            ]   8.01MB/58.46MB, progressDetail=ProgressDetail{current=8010452, start=null, total=58458375}}
+21:32:09.407 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:09.408 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Extracting, stream=null, error=null, progress=[>                                                  ]  32.77kB/2.066MB, progressDetail=ProgressDetail{current=32768, start=null, total=2065537}}
+21:32:09.507 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Extracting, stream=null, error=null, progress=[================>                                  ]  688.1kB/2.066MB, progressDetail=ProgressDetail{current=688128, start=null, total=2065537}}
+21:32:09.560 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Extracting, stream=null, error=null, progress=[==================================================>]  2.066MB/2.066MB, progressDetail=ProgressDetail{current=2065537, start=null, total=2065537}}
+21:32:09.657 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======>                                           ]  8.543MB/58.46MB, progressDetail=ProgressDetail{current=8542932, start=null, total=58458375}}
+21:32:09.741 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=ff3a5c916c92, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:09.752 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Extracting, stream=null, error=null, progress=[>                                                  ]  65.54kB/3.419MB, progressDetail=ProgressDetail{current=65536, start=null, total=3418757}}
+21:32:09.851 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Extracting, stream=null, error=null, progress=[=================>                                 ]   1.18MB/3.419MB, progressDetail=ProgressDetail{current=1179648, start=null, total=3418757}}
+21:32:09.930 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Extracting, stream=null, error=null, progress=[==================================================>]  3.419MB/3.419MB, progressDetail=ProgressDetail{current=3418757, start=null, total=3418757}}
+21:32:09.943 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======>                                           ]  9.084MB/58.46MB, progressDetail=ProgressDetail{current=9083604, start=null, total=58458375}}
+21:32:09.990 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=c4f576d46465, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:10.118 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========>                                          ]  9.624MB/58.46MB, progressDetail=ProgressDetail{current=9624276, start=null, total=58458375}}
+21:32:10.271 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[>                                                  ]  171.2kB/16.97MB, progressDetail=ProgressDetail{current=171249, start=null, total=16971429}}
+21:32:10.397 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=>                                                 ]  523.2kB/16.97MB, progressDetail=ProgressDetail{current=523239, start=null, total=16971429}}
+21:32:10.405 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========>                                          ]  10.16MB/58.46MB, progressDetail=ProgressDetail{current=10156756, start=null, total=58458375}}
+21:32:10.541 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==>                                                ]  883.4kB/16.97MB, progressDetail=ProgressDetail{current=883448, start=null, total=16971429}}
+21:32:10.669 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[===>                                               ]  1.244MB/16.97MB, progressDetail=ProgressDetail{current=1243896, start=null, total=16971429}}
+21:32:10.728 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========>                                         ]   10.7MB/58.46MB, progressDetail=ProgressDetail{current=10697428, start=null, total=58458375}}
+21:32:10.755 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Downloading, stream=null, error=null, progress=[==================================================>]     109B/109B, progressDetail=ProgressDetail{current=109, start=null, total=109}}
+21:32:10.755 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:10.755 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Download complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:10.839 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[====>                                              ]  1.596MB/16.97MB, progressDetail=ProgressDetail{current=1596152, start=null, total=16971429}}
+21:32:10.985 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[======>                                            ]  2.137MB/16.97MB, progressDetail=ProgressDetail{current=2136824, start=null, total=16971429}}
+21:32:11.037 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========>                                         ]  11.23MB/58.46MB, progressDetail=ProgressDetail{current=11234004, start=null, total=58458375}}
+21:32:11.097 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=======>                                           ]  2.497MB/16.97MB, progressDetail=ProgressDetail{current=2497272, start=null, total=16971429}}
+21:32:11.231 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[========>                                          ]  3.038MB/16.97MB, progressDetail=ProgressDetail{current=3037944, start=null, total=16971429}}
+21:32:11.370 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==========>                                        ]   3.57MB/16.97MB, progressDetail=ProgressDetail{current=3570424, start=null, total=16971429}}
+21:32:11.373 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========>                                        ]  11.77MB/58.46MB, progressDetail=ProgressDetail{current=11770580, start=null, total=58458375}}
+21:32:11.481 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[============>                                      ]  4.107MB/16.97MB, progressDetail=ProgressDetail{current=4107000, start=null, total=16971429}}
+21:32:11.591 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=============>                                     ]  4.472MB/16.97MB, progressDetail=ProgressDetail{current=4471544, start=null, total=16971429}}
+21:32:11.726 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==============>                                    ]  5.004MB/16.97MB, progressDetail=ProgressDetail{current=5004024, start=null, total=16971429}}
+21:32:11.828 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========>                                        ]  12.31MB/58.46MB, progressDetail=ProgressDetail{current=12307156, start=null, total=58458375}}
+21:32:11.849 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[================>                                  ]  5.717MB/16.97MB, progressDetail=ProgressDetail{current=5716728, start=null, total=16971429}}
+21:32:11.963 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==================>                                ]  6.257MB/16.97MB, progressDetail=ProgressDetail{current=6257400, start=null, total=16971429}}
+21:32:12.121 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[====================>                              ]  6.962MB/16.97MB, progressDetail=ProgressDetail{current=6961912, start=null, total=16971429}}
+21:32:12.216 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========>                                        ]  12.85MB/58.46MB, progressDetail=ProgressDetail{current=12847828, start=null, total=58458375}}
+21:32:12.264 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[======================>                            ]  7.683MB/16.97MB, progressDetail=ProgressDetail{current=7682808, start=null, total=16971429}}
+21:32:12.369 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=======================>                           ]  8.043MB/16.97MB, progressDetail=ProgressDetail{current=8043256, start=null, total=16971429}}
+21:32:12.484 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=========================>                         ]  8.584MB/16.97MB, progressDetail=ProgressDetail{current=8583928, start=null, total=16971429}}
+21:32:12.597 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==========================>                        ]  9.125MB/16.97MB, progressDetail=ProgressDetail{current=9124600, start=null, total=16971429}}
+21:32:12.719 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========>                                       ]  13.39MB/58.46MB, progressDetail=ProgressDetail{current=13388500, start=null, total=58458375}}
+21:32:12.732 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[============================>                      ]  9.833MB/16.97MB, progressDetail=ProgressDetail{current=9833208, start=null, total=16971429}}
+21:32:12.852 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==============================>                    ]  10.37MB/16.97MB, progressDetail=ProgressDetail{current=10365688, start=null, total=16971429}}
+21:32:13.003 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[================================>                  ]  11.09MB/16.97MB, progressDetail=ProgressDetail{current=11090680, start=null, total=16971429}}
+21:32:13.139 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[==================================>                ]  11.81MB/16.97MB, progressDetail=ProgressDetail{current=11807480, start=null, total=16971429}}
+21:32:13.260 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========>                                       ]  13.93MB/58.46MB, progressDetail=ProgressDetail{current=13925076, start=null, total=58458375}}
+21:32:13.260 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[====================================>              ]  12.53MB/16.97MB, progressDetail=ProgressDetail{current=12528376, start=null, total=16971429}}
+21:32:13.366 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[======================================>            ]  13.07MB/16.97MB, progressDetail=ProgressDetail{current=13069048, start=null, total=16971429}}
+21:32:13.680 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[========================================>          ]  13.79MB/16.97MB, progressDetail=ProgressDetail{current=13789944, start=null, total=16971429}}
+21:32:13.781 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[===========================================>       ]  14.88MB/16.97MB, progressDetail=ProgressDetail{current=14875384, start=null, total=16971429}}
+21:32:13.972 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[============================================>      ]  15.24MB/16.97MB, progressDetail=ProgressDetail{current=15235832, start=null, total=16971429}}
+21:32:14.175 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=============================================>     ]  15.42MB/16.97MB, progressDetail=ProgressDetail{current=15416056, start=null, total=16971429}}
+21:32:14.178 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============>                                      ]  14.47MB/58.46MB, progressDetail=ProgressDetail{current=14465748, start=null, total=58458375}}
+21:32:14.291 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[===============================================>   ]  16.14MB/16.97MB, progressDetail=ProgressDetail{current=16136952, start=null, total=16971429}}
+21:32:14.424 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Downloading, stream=null, error=null, progress=[=================================================> ]  16.68MB/16.97MB, progressDetail=ProgressDetail{current=16677624, start=null, total=16971429}}
+21:32:14.462 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:14.462 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Download complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:14.579 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============>                                      ]  15.01MB/58.46MB, progressDetail=ProgressDetail{current=15006420, start=null, total=58458375}}
+21:32:14.734 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============>                                     ]  15.54MB/58.46MB, progressDetail=ProgressDetail{current=15542996, start=null, total=58458375}}
+21:32:14.899 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============>                                     ]  16.08MB/58.46MB, progressDetail=ProgressDetail{current=16075476, start=null, total=58458375}}
+21:32:15.056 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============>                                    ]  16.62MB/58.46MB, progressDetail=ProgressDetail{current=16616148, start=null, total=58458375}}
+21:32:15.224 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============>                                    ]  17.16MB/58.46MB, progressDetail=ProgressDetail{current=17156820, start=null, total=58458375}}
+21:32:15.368 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============>                                   ]  17.68MB/58.46MB, progressDetail=ProgressDetail{current=17681241, start=null, total=58458375}}
+21:32:15.514 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============>                                   ]  18.22MB/58.46MB, progressDetail=ProgressDetail{current=18217684, start=null, total=58458375}}
+21:32:15.701 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================>                                  ]  18.76MB/58.46MB, progressDetail=ProgressDetail{current=18758356, start=null, total=58458375}}
+21:32:15.875 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================>                                  ]  19.28MB/58.46MB, progressDetail=ProgressDetail{current=19282688, start=null, total=58458375}}
+21:32:16.010 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================>                                  ]  19.81MB/58.46MB, progressDetail=ProgressDetail{current=19811028, start=null, total=58458375}}
+21:32:16.142 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================>                                 ]  20.34MB/58.46MB, progressDetail=ProgressDetail{current=20339412, start=null, total=58458375}}
+21:32:16.359 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================>                                 ]  20.88MB/58.46MB, progressDetail=ProgressDetail{current=20880084, start=null, total=58458375}}
+21:32:16.523 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==================>                                ]  21.42MB/58.46MB, progressDetail=ProgressDetail{current=21420756, start=null, total=58458375}}
+21:32:16.648 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==================>                                ]  21.96MB/58.46MB, progressDetail=ProgressDetail{current=21957332, start=null, total=58458375}}
+21:32:16.777 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===================>                               ]   22.5MB/58.46MB, progressDetail=ProgressDetail{current=22498004, start=null, total=58458375}}
+21:32:16.936 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===================>                               ]  23.03MB/58.46MB, progressDetail=ProgressDetail{current=23034580, start=null, total=58458375}}
+21:32:17.058 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====================>                              ]  23.56MB/58.46MB, progressDetail=ProgressDetail{current=23562964, start=null, total=58458375}}
+21:32:17.196 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====================>                              ]  24.09MB/58.46MB, progressDetail=ProgressDetail{current=24091348, start=null, total=58458375}}
+21:32:17.335 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====================>                             ]  24.63MB/58.46MB, progressDetail=ProgressDetail{current=24627924, start=null, total=58458375}}
+21:32:17.635 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====================>                             ]  25.17MB/58.46MB, progressDetail=ProgressDetail{current=25168596, start=null, total=58458375}}
+21:32:17.773 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====================>                             ]  25.71MB/58.46MB, progressDetail=ProgressDetail{current=25709268, start=null, total=58458375}}
+21:32:17.918 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======================>                            ]  26.25MB/58.46MB, progressDetail=ProgressDetail{current=26249940, start=null, total=58458375}}
+21:32:18.042 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======================>                            ]  26.79MB/58.46MB, progressDetail=ProgressDetail{current=26790612, start=null, total=58458375}}
+21:32:18.239 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======================>                           ]  27.33MB/58.46MB, progressDetail=ProgressDetail{current=27331284, start=null, total=58458375}}
+21:32:18.370 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======================>                           ]  27.87MB/58.46MB, progressDetail=ProgressDetail{current=27871956, start=null, total=58458375}}
+21:32:18.512 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========================>                          ]  28.41MB/58.46MB, progressDetail=ProgressDetail{current=28412628, start=null, total=58458375}}
+21:32:18.637 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========================>                          ]  28.95MB/58.46MB, progressDetail=ProgressDetail{current=28953300, start=null, total=58458375}}
+21:32:18.781 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========================>                         ]  29.49MB/58.46MB, progressDetail=ProgressDetail{current=29493972, start=null, total=58458375}}
+21:32:18.900 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========================>                         ]  30.03MB/58.46MB, progressDetail=ProgressDetail{current=30026452, start=null, total=58458375}}
+21:32:19.016 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========================>                        ]  30.55MB/58.46MB, progressDetail=ProgressDetail{current=30554836, start=null, total=58458375}}
+21:32:19.160 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========================>                        ]   31.1MB/58.46MB, progressDetail=ProgressDetail{current=31095508, start=null, total=58458375}}
+21:32:19.289 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========================>                       ]  31.62MB/58.46MB, progressDetail=ProgressDetail{current=31623892, start=null, total=58458375}}
+21:32:19.428 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========================>                       ]  32.16MB/58.46MB, progressDetail=ProgressDetail{current=32160468, start=null, total=58458375}}
+21:32:19.542 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========================>                       ]   32.7MB/58.46MB, progressDetail=ProgressDetail{current=32701140, start=null, total=58458375}}
+21:32:19.675 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============================>                      ]  33.24MB/58.46MB, progressDetail=ProgressDetail{current=33237716, start=null, total=58458375}}
+21:32:19.798 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============================>                      ]  33.78MB/58.46MB, progressDetail=ProgressDetail{current=33778388, start=null, total=58458375}}
+21:32:19.925 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============================>                     ]  34.32MB/58.46MB, progressDetail=ProgressDetail{current=34319060, start=null, total=58458375}}
+21:32:20.068 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============================>                     ]  34.85MB/58.46MB, progressDetail=ProgressDetail{current=34847444, start=null, total=58458375}}
+21:32:20.210 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============================>                    ]  35.39MB/58.46MB, progressDetail=ProgressDetail{current=35388116, start=null, total=58458375}}
+21:32:20.330 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============================>                    ]  35.93MB/58.46MB, progressDetail=ProgressDetail{current=35928788, start=null, total=58458375}}
+21:32:20.454 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============================>                   ]  36.47MB/58.46MB, progressDetail=ProgressDetail{current=36469460, start=null, total=58458375}}
+21:32:20.596 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============================>                   ]     37MB/58.46MB, progressDetail=ProgressDetail{current=36997844, start=null, total=58458375}}
+21:32:20.742 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================================>                  ]  37.54MB/58.46MB, progressDetail=ProgressDetail{current=37538516, start=null, total=58458375}}
+21:32:20.865 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================================>                  ]  38.07MB/58.46MB, progressDetail=ProgressDetail{current=38070996, start=null, total=58458375}}
+21:32:20.983 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================>                 ]   38.6MB/58.46MB, progressDetail=ProgressDetail{current=38603476, start=null, total=58458375}}
+21:32:21.106 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================>                 ]  39.13MB/58.46MB, progressDetail=ProgressDetail{current=39131860, start=null, total=58458375}}
+21:32:21.422 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================>                 ]  39.67MB/58.46MB, progressDetail=ProgressDetail{current=39672532, start=null, total=58458375}}
+21:32:22.086 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==================================>                ]  40.21MB/58.46MB, progressDetail=ProgressDetail{current=40209108, start=null, total=58458375}}
+21:32:22.649 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==================================>                ]  40.74MB/58.46MB, progressDetail=ProgressDetail{current=40737492, start=null, total=58458375}}
+21:32:23.263 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===================================>               ]  41.27MB/58.46MB, progressDetail=ProgressDetail{current=41269972, start=null, total=58458375}}
+21:32:24.045 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===================================>               ]   41.8MB/58.46MB, progressDetail=ProgressDetail{current=41798356, start=null, total=58458375}}
+21:32:24.754 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====================================>              ]  42.34MB/58.46MB, progressDetail=ProgressDetail{current=42339028, start=null, total=58458375}}
+21:32:25.417 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[====================================>              ]  42.87MB/58.46MB, progressDetail=ProgressDetail{current=42871508, start=null, total=58458375}}
+21:32:25.924 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====================================>             ]   43.4MB/58.46MB, progressDetail=ProgressDetail{current=43399892, start=null, total=58458375}}
+21:32:26.681 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=====================================>             ]  43.94MB/58.46MB, progressDetail=ProgressDetail{current=43940564, start=null, total=58458375}}
+21:32:26.841 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======================================>            ]  44.48MB/58.46MB, progressDetail=ProgressDetail{current=44481236, start=null, total=58458375}}
+21:32:26.954 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======================================>            ]  45.02MB/58.46MB, progressDetail=ProgressDetail{current=45021908, start=null, total=58458375}}
+21:32:27.166 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[======================================>            ]  45.56MB/58.46MB, progressDetail=ProgressDetail{current=45562580, start=null, total=58458375}}
+21:32:27.322 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======================================>           ]  46.09MB/58.46MB, progressDetail=ProgressDetail{current=46087533, start=null, total=58458375}}
+21:32:27.775 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=======================================>           ]  46.62MB/58.46MB, progressDetail=ProgressDetail{current=46623444, start=null, total=58458375}}
+21:32:27.964 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========================================>          ]  47.16MB/58.46MB, progressDetail=ProgressDetail{current=47155924, start=null, total=58458375}}
+21:32:28.878 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[========================================>          ]  47.69MB/58.46MB, progressDetail=ProgressDetail{current=47692500, start=null, total=58458375}}
+21:32:29.167 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========================================>         ]  48.23MB/58.46MB, progressDetail=ProgressDetail{current=48233172, start=null, total=58458375}}
+21:32:29.328 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=========================================>         ]  48.77MB/58.46MB, progressDetail=ProgressDetail{current=48773844, start=null, total=58458375}}
+21:32:29.766 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========================================>        ]  49.31MB/58.46MB, progressDetail=ProgressDetail{current=49306324, start=null, total=58458375}}
+21:32:30.323 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==========================================>        ]  49.84MB/58.46MB, progressDetail=ProgressDetail{current=49842900, start=null, total=58458375}}
+21:32:30.480 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========================================>       ]  50.38MB/58.46MB, progressDetail=ProgressDetail{current=50383572, start=null, total=58458375}}
+21:32:30.855 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===========================================>       ]  50.92MB/58.46MB, progressDetail=ProgressDetail{current=50924244, start=null, total=58458375}}
+21:32:31.011 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============================================>      ]  51.45MB/58.46MB, progressDetail=ProgressDetail{current=51449463, start=null, total=58458375}}
+21:32:31.759 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============================================>      ]  51.98MB/58.46MB, progressDetail=ProgressDetail{current=51981012, start=null, total=58458375}}
+21:32:32.305 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[============================================>      ]  52.51MB/58.46MB, progressDetail=ProgressDetail{current=52513492, start=null, total=58458375}}
+21:32:32.437 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============================================>     ]  53.04MB/58.46MB, progressDetail=ProgressDetail{current=53037824, start=null, total=58458375}}
+21:32:32.576 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=============================================>     ]  53.58MB/58.46MB, progressDetail=ProgressDetail{current=53578452, start=null, total=58458375}}
+21:32:32.955 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============================================>    ]  54.12MB/58.46MB, progressDetail=ProgressDetail{current=54119124, start=null, total=58458375}}
+21:32:33.116 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[==============================================>    ]  54.65MB/58.46MB, progressDetail=ProgressDetail{current=54651604, start=null, total=58458375}}
+21:32:33.421 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============================================>   ]  55.19MB/58.46MB, progressDetail=ProgressDetail{current=55192276, start=null, total=58458375}}
+21:32:33.573 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[===============================================>   ]  55.73MB/58.46MB, progressDetail=ProgressDetail{current=55732948, start=null, total=58458375}}
+21:32:34.019 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================================================>  ]  56.27MB/58.46MB, progressDetail=ProgressDetail{current=56273620, start=null, total=58458375}}
+21:32:34.199 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[================================================>  ]  56.81MB/58.46MB, progressDetail=ProgressDetail{current=56806100, start=null, total=58458375}}
+21:32:34.467 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================================> ]  57.35MB/58.46MB, progressDetail=ProgressDetail{current=57346772, start=null, total=58458375}}
+21:32:34.593 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================================> ]  57.88MB/58.46MB, progressDetail=ProgressDetail{current=57875156, start=null, total=58458375}}
+21:32:34.825 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Downloading, stream=null, error=null, progress=[=================================================> ]   58.4MB/58.46MB, progressDetail=ProgressDetail{current=58403540, start=null, total=58458375}}
+21:32:34.890 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Verifying Checksum, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:34.891 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Download complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:34.991 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[>                                                  ]  557.1kB/58.46MB, progressDetail=ProgressDetail{current=557056, start=null, total=58458375}}
+21:32:35.106 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[======>                                            ]  7.242MB/58.46MB, progressDetail=ProgressDetail{current=7241728, start=null, total=58458375}}
+21:32:35.216 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=========>                                         ]  10.58MB/58.46MB, progressDetail=ProgressDetail{current=10584064, start=null, total=58458375}}
+21:32:35.322 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[============>                                      ]  14.48MB/58.46MB, progressDetail=ProgressDetail{current=14483456, start=null, total=58458375}}
+21:32:35.425 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=================>                                 ]  20.61MB/58.46MB, progressDetail=ProgressDetail{current=20611072, start=null, total=58458375}}
+21:32:35.527 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[====================>                              ]  23.95MB/58.46MB, progressDetail=ProgressDetail{current=23953408, start=null, total=58458375}}
+21:32:35.648 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=======================>                           ]   27.3MB/58.46MB, progressDetail=ProgressDetail{current=27295744, start=null, total=58458375}}
+21:32:35.757 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=========================>                         ]  30.08MB/58.46MB, progressDetail=ProgressDetail{current=30081024, start=null, total=58458375}}
+21:32:35.870 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[============================>                      ]  33.42MB/58.46MB, progressDetail=ProgressDetail{current=33423360, start=null, total=58458375}}
+21:32:36.007 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[==============================>                    ]  35.65MB/58.46MB, progressDetail=ProgressDetail{current=35651584, start=null, total=58458375}}
+21:32:36.107 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[===============================>                   ]  37.32MB/58.46MB, progressDetail=ProgressDetail{current=37322752, start=null, total=58458375}}
+21:32:36.209 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=================================>                 ]  38.99MB/58.46MB, progressDetail=ProgressDetail{current=38993920, start=null, total=58458375}}
+21:32:36.310 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[===================================>               ]  41.22MB/58.46MB, progressDetail=ProgressDetail{current=41222144, start=null, total=58458375}}
+21:32:36.415 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=====================================>             ]  44.01MB/58.46MB, progressDetail=ProgressDetail{current=44007424, start=null, total=58458375}}
+21:32:36.524 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[========================================>          ]  46.79MB/58.46MB, progressDetail=ProgressDetail{current=46792704, start=null, total=58458375}}
+21:32:36.625 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[=========================================>         ]  48.46MB/58.46MB, progressDetail=ProgressDetail{current=48463872, start=null, total=58458375}}
+21:32:36.727 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[============================================>      ]  51.81MB/58.46MB, progressDetail=ProgressDetail{current=51806208, start=null, total=58458375}}
+21:32:36.857 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[==============================================>    ]  54.59MB/58.46MB, progressDetail=ProgressDetail{current=54591488, start=null, total=58458375}}
+21:32:36.975 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[================================================>  ]  56.82MB/58.46MB, progressDetail=ProgressDetail{current=56819712, start=null, total=58458375}}
+21:32:37.082 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[==================================================>]  58.46MB/58.46MB, progressDetail=ProgressDetail{current=58458375, start=null, total=58458375}}
+21:32:37.087 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Extracting, stream=null, error=null, progress=[==================================================>]  58.46MB/58.46MB, progressDetail=ProgressDetail{current=58458375, start=null, total=58458375}}
+21:32:37.697 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=af4610e1ed7a, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:37.702 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Extracting, stream=null, error=null, progress=[==================================================>]      97B/97B, progressDetail=ProgressDetail{current=97, start=null, total=97}}
+21:32:37.702 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Extracting, stream=null, error=null, progress=[==================================================>]      97B/97B, progressDetail=ProgressDetail{current=97, start=null, total=97}}
+21:32:37.827 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b4b4698549ee, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:37.838 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Extracting, stream=null, error=null, progress=[>                                                  ]  196.6kB/16.97MB, progressDetail=ProgressDetail{current=196608, start=null, total=16971429}}
+21:32:37.939 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Extracting, stream=null, error=null, progress=[===========>                                       ]  3.736MB/16.97MB, progressDetail=ProgressDetail{current=3735552, start=null, total=16971429}}
+21:32:38.040 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Extracting, stream=null, error=null, progress=[============================>                      ]   9.83MB/16.97MB, progressDetail=ProgressDetail{current=9830400, start=null, total=16971429}}
+21:32:38.144 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Extracting, stream=null, error=null, progress=[===========================================>       ]  14.75MB/16.97MB, progressDetail=ProgressDetail{current=14745600, start=null, total=16971429}}
+21:32:38.184 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Extracting, stream=null, error=null, progress=[==================================================>]  16.97MB/16.97MB, progressDetail=ProgressDetail{current=16971429, start=null, total=16971429}}
+21:32:38.260 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=8ac6f4c541a5, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:38.265 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Extracting, stream=null, error=null, progress=[==================================================>]     109B/109B, progressDetail=ProgressDetail{current=109, start=null, total=109}}
+21:32:38.265 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Extracting, stream=null, error=null, progress=[==================================================>]     109B/109B, progressDetail=ProgressDetail{current=109, start=null, total=109}}
+21:32:38.385 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=b165b7a67e4b, status=Pull complete, stream=null, error=null, progress=null, progressDetail=ProgressDetail{current=null, start=null, total=null}}
+21:32:38.394 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=null, status=Digest: sha256:4683694cc9d1bbd9efa0b35af08f2d8da7f9f7c8680f5d58c1ae566166d36b4b, stream=null, error=null, progress=null, progressDetail=null}
+21:32:38.399 [pool-7-thread-1] INFO com.spotify.docker.client.LoggingPullHandler - pull fingershock/dynamodb-local:latest: ProgressMessage{id=null, status=Status: Downloaded newer image for fingershock/dynamodb-local:latest, stream=null, error=null, progress=null, progressDetail=null}
+21:32:38.451 [pool-7-thread-1] INFO com.spotify.docker.client.DefaultDockerClient - Creating container with ContainerConfig: ContainerConfig{hostname=null, domainname=null, user=null, attachStdin=false, attachStdout=null, attachStderr=null, portSpecs=null, exposedPorts=[8000], tty=false, openStdin=null, stdinOnce=null, env=[], cmd=null, image=fingershock/dynamodb-local:latest, volumes={}, workingDir=null, entrypoint=null, networkDisabled=null, onBuild=null, labels=null, macAddress=null, hostConfig=HostConfig{binds=[], blkioWeight=null, blkioWeightDevice=null, blkioDeviceReadBps=null, blkioDeviceWriteBps=null, blkioDeviceReadIOps=null, blkioDeviceWriteIOps=null, containerIdFile=null, lxcConf=null, privileged=null, portBindings={8000=[PortBinding{hostIp=0.0.0.0, hostPort=62377}]}, links=null, publishAllPorts=null, dns=null, dnsOptions=null, dnsSearch=null, extraHosts=null, volumesFrom=null, capAdd=null, capDrop=null, networkMode=null, securityOpt=null, devices=null, memory=null, memorySwap=null, memorySwappiness=null, memoryReservation=null, nanoCpus=null, cpuPeriod=null, cpuShares=null, cpusetCpus=null, cpusetMems=null, cpuQuota=null, cgroupParent=null, restartPolicy=null, logConfig=null, ipcMode=null, ulimits=null, pidMode=null, shmSize=null, oomKillDisable=null, oomScoreAdj=null, autoRemove=null, pidsLimit=null, tmpfs=null, readonlyRootfs=null, storageOpt=null}, stopSignal=null, healthcheck=null, networkingConfig=null}
+21:32:38.715 [pool-7-thread-1] INFO com.spotify.docker.client.DefaultDockerClient - Starting container with Id: 1f2cca97435055ff52d8cf99c8d298e7a01bd3d0ab8399bdabc7d58206336c7d
+[info] DynamoDBSpec:
+[info] DynamoDB
+[info] - should success
+[info] Run completed in 42 seconds, 952 milliseconds.
+[info] Total number of tests run: 1
+[info] Suites: completed 1, aborted 0
+[info] Tests: succeeded 1, failed 0, canceled 0, ignored 0, pending 0
+[info] All tests passed.
+[success] Total time: 50 s, completed Jun 24, 2018 9:28:48 PM
+          </code></pre>
+          <p></p>
+        </section>
+
+        <section data-markdown>
+          <textarea data-template>
+## まとめ
+
+* [whisklabs/docker-it-scala](https://github.com/whisklabs/docker-it-scala) を使えば、
+
+  UnitテストからDocker Imageを実行できる。
+* [spotify/docker-client](https://github.com/spotify/docker-client) は、Javaライブラリなので、
+
+  きっと同じことできる。
+* `git clone` したら `test` がすぐできる。
+
+* CD/CIのときも、環境作らなくて良い。
+
+* サンプルコードは、 [yoshiyoshifujii/180623_using_docker_in_unit_test_of_scala](https://github.com/yoshiyoshifujii/180623_using_docker_in_unit_test_of_scala)
+          </textarea>
+        </section>
+
+        <section>
+          <h1>以上です</h1>
+        </section>
+
 
       </div>
     </div>
