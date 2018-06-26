@@ -7,7 +7,7 @@
     <title>reveal.js</title>
 
     <link rel="stylesheet" href="css/reveal.css">
-    <link rel="stylesheet" href="css/theme/black.css">
+    <link rel="stylesheet" href="css/theme/blood.css">
 
     <!-- Theme used for syntax highlighting of code -->
     <link rel="stylesheet" href="lib/css/zenburn.css">
@@ -26,7 +26,7 @@
       <div class="slides">
 
         <section>
-          <img src="./img/kinoko.png" style="position:absolute;left:-20px;top:-90px;transform:rotate(-5deg);width:400px;border:0px;">
+          <img src="./img/kinoko.png" style="position:absolute;left:-90px;top:-20px;transform:rotate(-6deg);width:400px;border:0px;">
           <h1>ScalaのUnitテストで<span style="color:white;">Docker</span></h1>
           <a href="https://twitter.com/yoshiyoshifujii" target="_blank">@yoshiyoshifujii</a>
         </section>
@@ -52,9 +52,10 @@
         <section data-markdown>
           <textarea data-template>
 * データベースを操作するプログラムのテスト
+* Mockとかにしちゃいがち
 * ElasticSearch
 * Amazon Simple Queue Service
-* 外部サービス/ミドルウェア
+* 様々な外部サービス/ミドルウェア
           </textarea>
         </section>
 
@@ -77,6 +78,8 @@
 * インストールできない場合は接続できるように
 * 版が変わったらSlaveの環境を更新
 * 職人の誕生
+* 開発環境と別で対応する必要がある
+* 開発環境と共存にすると、ルールでしばったり大変
           </textarea>
         </section>
 
